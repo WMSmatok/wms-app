@@ -6,9 +6,34 @@ import math
 import time
 
 # --- הגדרות ---
-# וודא שהשמות האלו זהים בול לשמות בדרייב שלך
 SHEET_LIVESTOCK = "LIVESTOCK"
 SHEET_ORDERS = "מערכת ליקוט WMS"
+
+# --- פונקציה לטעינה בטוחה (מונעת את הקריסה) ---
+def load_data_safe(ws):
+    """
+    קוראת את הנתונים בצורה גולמית ובונה את הטבלה ידנית,
+    כדי למנוע קריסה במקרה של עמודות כפולות או ריקות
+    """
+    try:
+        # קריאת כל הערכים כולל הכל
+        all_values = ws.get_all_values()
+        
+        # אם הגיליון ריק לגמרי
+        if not all_values:
+            return pd.DataFrame()
+
+        # השורה הראשונה היא הכותרות
+        headers = all_values[0]
+        # שאר השורות הן המידע
+        data = all_values[1:]
+
+        # יצירת טבלה, מתמודד אוטומטית עם כפילויות
+        df = pd.DataFrame(data, columns=headers)
+        return df
+    except Exception as e:
+        st.error(f"שגיאה בטעינת הנתונים מהגיליון: {e}")
+        return pd.DataFrame()
 
 # --- פונקציות חיבור ---
 def connect_google():
@@ -18,7 +43,7 @@ def connect_google():
             gc = gspread.service_account_from_dict(key_dict)
             return gc
         else:
-            st.error("❌ שגיאה: חסר מפתח 'textkey' בהגדרות ה-Secrets של האתר.")
+            st.error("❌ שגיאה: חסר מפתח 'textkey' בהגדרות ה-Secrets.")
             return None
     except Exception as e:
         st.error(f"❌ שגיאה בקריאת המפתח הסודי: {e}")
@@ -49,44 +74,37 @@ gc = connect_google()
 if not gc:
     st.stop()
 
-# --- טעינת נתונים עם דיווח שגיאות מפורט ---
-# שלב 1: טעינת מלאי
+# --- טעינת נתונים (בשיטה החדשה והבטוחה) ---
+
+# 1. מלאי
 try:
     sh_inv = gc.open(SHEET_LIVESTOCK)
-except Exception as e:
-    st.error(f"❌ לא הצלחתי למצוא את קובץ המלאי בשם: '{SHEET_LIVESTOCK}'")
-    st.info(f"הודעת השגיאה המקורית: {e}")
-    st.warning("טיפ: וודא שהקובץ קיים בדרייב וששיתפת אותו עם המייל של הרובוט.")
+except:
+    st.error(f"❌ לא נמצא קובץ המלאי: '{SHEET_LIVESTOCK}'")
     st.stop()
 
-try: 
-    ws_inv = sh_inv.worksheet("LIVESTOCK")
-except: 
-    # גיבוי: אם השם לא תואם, לוקח את הלשונית הראשונה
-    ws_inv = sh_inv.get_worksheet(0)
+try: ws_inv = sh_inv.worksheet("LIVESTOCK")
+except: ws_inv = sh_inv.get_worksheet(0)
 
-df_inv = pd.DataFrame(ws_inv.get_all_records())
+# שימוש בפונקציה הבטוחה
+df_inv = load_data_safe(ws_inv)
 
-# שלב 2: טעינת הזמנות
+# 2. הזמנות
 try:
     sh_ords = gc.open(SHEET_ORDERS)
-except Exception as e:
-    st.error(f"❌ לא הצלחתי למצוא את קובץ ההזמנות בשם: '{SHEET_ORDERS}'")
-    st.info(f"הודעת השגיאה המקורית: {e}")
+except:
+    st.error(f"❌ לא נמצא קובץ ההזמנות: '{SHEET_ORDERS}'")
     st.stop()
 
-try: 
-    ws_ords = sh_ords.worksheet("PICKTASKS")
-except: 
-    # גיבוי: לוקח לשונית ראשונה
-    ws_ords = sh_ords.get_worksheet(0)
+try: ws_ords = sh_ords.worksheet("PICKTASKS")
+except: ws_ords = sh_ords.get_worksheet(0)
 
-df_ords = pd.DataFrame(ws_ords.get_all_records())
+# שימוש בפונקציה הבטוחה
+df_ords = load_data_safe(ws_ords)
 
 
-# --- המשך התוכנה (רק אם הכל נטען תקין) ---
+# --- לוגיקת המערכת ---
 
-# זיהוי עמודות
 col_status = find_column(df_ords, ['Status', 'סטטוס', 'מצב'])
 col_pname_ord = find_column(df_ords, ['ProductName', 'שם מוצר', 'פריט', 'SKU'])
 col_qty_ord = find_column(df_ords, ['QtyToPick', 'כמות', 'Quantity'])
@@ -97,6 +115,7 @@ col_batch_inv = find_column(df_inv, ['אצווה', 'BatchNumber', 'Batch', 'תא
 col_date_inv = find_column(df_inv, ['תאריך ושעה', 'EntryDate', 'Date'])
 
 if col_status:
+    # סינון משימות פתוחות
     pending = df_ords[df_ords[col_status] != 'Done']
 
     if pending.empty:
@@ -104,10 +123,18 @@ if col_status:
         st.balloons()
     else:
         current_task = pending.iloc[0]
-        task_index = pending.index[0]
+        # כדי למצוא את מספר השורה האמיתי באקסל (שמירת האינדקס המקורי)
+        task_real_index = current_task.name 
 
         p_name = str(current_task.get(col_pname_ord, 'Unknown')).strip()
-        qty_needed = float(current_task.get(col_qty_ord, 0))
+        
+        # המרת כמות למספר (טיפול במקרים של טקסט ריק)
+        try:
+            qty_val = current_task.get(col_qty_ord, 0)
+            if qty_val == "": qty_val = 0
+            qty_needed = float(qty_val)
+        except:
+            qty_needed = 0
 
         div = 24 if "מתוק וקל 1000" in p_name else 12
         try: cartons = math.ceil(qty_needed / div)
@@ -116,9 +143,8 @@ if col_status:
         target_batch = "לא נמצא"
         target_stock = 0
         
-        # חיפוש חכם במלאי (טיפול ברווחים)
+        # חיפוש חכם במלאי (ניקוי רווחים)
         if col_name_inv:
-             # מנקים רווחים משם המוצר במלאי כדי למצוא התאמה
              df_inv['clean_name'] = df_inv[col_name_inv].astype(str).str.strip()
              stock_subset = df_inv[df_inv['clean_name'] == p_name]
              
@@ -131,7 +157,7 @@ if col_status:
                         target_stock = valid_stock.iloc[0].get(col_qty_inv, 0)
                 except: pass
         
-        # תצוגה
+        # --- תצוגה ---
         st.info(f"משימות שנותרו: {len(pending)}")
         st.markdown("---")
         st.markdown(f'<p class="big-font">📦 {p_name}</p>', unsafe_allow_html=True)
@@ -151,7 +177,8 @@ if col_status:
         """, unsafe_allow_html=True)
 
         st.write("")
-        scanned_code = st.text_input("סרוק ברקוד כאן:", key=f"scan_{task_index}")
+        # מפתח ייחודי לשדה כדי שיתנקה אחרי כל סריקה
+        scanned_code = st.text_input("סרוק ברקוד כאן:", key=f"scan_{task_real_index}")
 
         if scanned_code:
             scanned_clean = scanned_code.strip()
@@ -161,27 +188,51 @@ if col_status:
                 st.success(f"✅ סריקה תקינה! ({scanned_clean})")
                 try:
                     # עדכון מלאי
-                    # לוגיקה משופרת למציאת השורה לעדכון
                     inv_row_to_update = None
-                    all_records = ws_inv.get_all_records()
+                    # קריאה חדשה כדי לוודא שורות עדכניות
+                    all_records = ws_inv.get_all_values()
                     
+                    # חיפוש השורה המתאימה (מדלגים על כותרת - אינדקס מתחיל ב-0)
                     for i, record in enumerate(all_records):
-                        r_name = str(record.get(col_name_inv)).strip()
-                        r_batch = str(record.get(col_batch_inv)).strip()
+                        if i == 0: continue # דילוג על כותרת
+                        
+                        # מיפוי השורה הנוכחית לכותרות כדי למנוע טעויות אינדקס
+                        row_dict = dict(zip(all_records[0], record))
+                        
+                        r_name = str(row_dict.get(col_name_inv, '')).strip()
+                        r_batch = str(row_dict.get(col_batch_inv, '')).strip()
+                        
                         if r_name == p_name and r_batch == scanned_clean:
-                            inv_row_to_update = i + 2
+                            inv_row_to_update = i + 1 # +1 כי ב-Sheets מתחילים מ-1
                             break
                     
                     if inv_row_to_update:
-                        col_idx_qty = df_inv.columns.get_loc(col_qty_inv) + 1
-                        current_qty = float(ws_inv.cell(inv_row_to_update, col_idx_qty).value)
-                        new_qty = max(0, current_qty - qty_needed) # מונע ירידה מתחת לאפס
+                        # מציאת מיקום עמודת הכמות בזהירות
+                        headers = all_records[0]
+                        try:
+                            # שימוש ב-index כדי למצוא את המיקום האמיתי ברשימה (מונע בעיות כפילות)
+                            col_idx_qty = headers.index(col_qty_inv) + 1
+                        except:
+                            st.error("לא נמצאה עמודת כמות לעדכון")
+                            st.stop()
+
+                        current_val = ws_inv.cell(inv_row_to_update, col_idx_qty).value
+                        try: current_qty = float(current_val)
+                        except: current_qty = 0
+                        
+                        new_qty = max(0, current_qty - qty_needed)
                         ws_inv.update_cell(inv_row_to_update, col_idx_qty, new_qty)
                         st.info(f"המלאי עודכן: {current_qty} -> {new_qty}")
                     
                     # סגירת הזמנה
-                    row_num_ord = task_index + 2
-                    col_idx_status = df_ords.columns.get_loc(col_status) + 1
+                    # חישוב שורה: האינדקס ב-Pandas (שמתחיל מ-0 על המידע) + 2 (1 כותרת, 1 התחלה מ-0)
+                    row_num_ord = task_real_index + 2
+                    
+                    # מציאת מיקום עמודת הסטטוס בהזמנות
+                    all_ord_vals = ws_ords.get_all_values()
+                    ord_headers = all_ord_vals[0]
+                    col_idx_status = ord_headers.index(col_status) + 1
+                    
                     ws_ords.update_cell(row_num_ord, col_idx_status, "Done")
                     
                     st.toast("עודכן בהצלחה!")
@@ -192,8 +243,13 @@ if col_status:
                     st.error(f"שגיאה בעדכון הנתונים: {e}")
             
             elif scanned_clean.upper() == "OK":
-                row_num_ord = task_index + 2
-                col_idx_status = df_ords.columns.get_loc(col_status) + 1
+                row_num_ord = task_real_index + 2
+                
+                # מציאת מיקום עמודת הסטטוס
+                all_ord_vals = ws_ords.get_all_values()
+                ord_headers = all_ord_vals[0]
+                col_idx_status = ord_headers.index(col_status) + 1
+
                 ws_ords.update_cell(row_num_ord, col_idx_status, "Done")
                 st.warning("אושר ידנית.")
                 time.sleep(1)
