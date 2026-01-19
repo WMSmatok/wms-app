@@ -9,173 +9,215 @@ import time
 SHEET_LIVESTOCK = "LIVESTOCK"
 SHEET_ORDERS = "מערכת ליקוט WMS"
 
-# --- פונקציה חכמה למציאת עמודות (גמישה) ---
-def find_column(df, possible_names):
-    for name in possible_names:
-        if name in df.columns:
-            return name
-    return None
-
-# --- התחברות לגוגל ---
+# --- פונקציות חיבור ---
 def connect_google():
     try:
         if "textkey" in st.secrets:
             key_dict = json.loads(st.secrets["textkey"])
             gc = gspread.service_account_from_dict(key_dict)
             return gc
-        else:
-            st.error("חסר מפתח (textkey) בהגדרות ה-Secrets")
-            return None
-    except Exception as e:
-        st.error(f"שגיאת חיבור למפתח של גוגל: {e}")
-        return None
+    except: return None
+    return None
 
-# --- עיצוב האפליקציה ---
-st.set_page_config(page_title="WMS Cloud", layout="wide")
+def find_column(df, possible_names):
+    for name in possible_names:
+        if name in df.columns: return name
+    return None
+
+# --- עיצוב ---
+st.set_page_config(page_title="WMS Scanner", layout="wide")
 st.markdown("""
 <style>
     .stApp {direction: rtl;}
-    h1, h2, h3, p, div {text-align: right; font-family: sans-serif;}
-    .stButton>button {width: 100%; height: 70px; font-size: 22px; font-weight: bold; border-radius: 12px;}
-    .success-box {padding: 15px; background-color: #d4edda; color: #155724; border-radius: 8px; border: 1px solid #c3e6cb;}
-    .error-box {padding: 15px; background-color: #f8d7da; color: #721c24; border-radius: 8px; border: 1px solid #f5c6cb;}
-    .info-box {padding: 15px; background-color: #e2e3e5; color: #383d41; border-radius: 8px;}
+    div {text-align: right;}
+    .big-font {font-size: 30px !important; font-weight: bold; color: #1f77b4;}
+    .batch-box {padding: 20px; background-color: #fff3cd; border: 2px solid #ffeeba; border-radius: 10px; text-align: center;}
+    .scan-instruction {font-size: 24px; font-weight: bold; color: #dc3545;}
+    /* עיצוב שדה הסריקה */
+    div[data-testid="stTextInput"] input {
+        font-size: 20px; 
+        text-align: center; 
+        border: 2px solid #28a745;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("☁️ מערכת ליקוט ענן")
+st.title("🔫 מערכת ליקוט בסריקה")
 
 gc = connect_google()
 
-if gc:
-    try:
-        # 1. טעינת המלאי (LIVESTOCK)
-        try:
-            sh_inv = gc.open(SHEET_LIVESTOCK)
-            try:
-                ws_inv = sh_inv.worksheet("LIVESTOCK")
-            except:
-                # אם לא מוצא את הלשונית בשם הזה, לוקח את הראשונה
-                ws_inv = sh_inv.get_worksheet(0)
-            df_inv = pd.DataFrame(ws_inv.get_all_records())
-        except Exception as e:
-            st.error(f"לא הצלחתי לפתוח את קובץ המלאי '{SHEET_LIVESTOCK}'. האם השם נכון? האם שיתפת עם הרובוט?")
-            st.stop()
+if not gc:
+    st.error("שגיאת חיבור לגוגל")
+    st.stop()
 
-        # 2. טעינת ההזמנות (PICKTASKS)
-        try:
-            sh_ords = gc.open(SHEET_ORDERS)
-            try:
-                ws_ords = sh_ords.worksheet("PICKTASKS")
-            except:
-                ws_ords = sh_ords.sheet1 
-            df_ords = pd.DataFrame(ws_ords.get_all_records())
-        except Exception as e:
-            st.error(f"לא הצלחתי לפתוח את קובץ ההזמנות: {e}")
-            st.stop()
+# --- טעינת נתונים ---
+try:
+    # מלאי
+    sh_inv = gc.open(SHEET_LIVESTOCK)
+    try: ws_inv = sh_inv.worksheet("LIVESTOCK")
+    except: ws_inv = sh_inv.get_worksheet(0)
+    df_inv = pd.DataFrame(ws_inv.get_all_records())
 
-        if st.button("🔄 רענן נתונים"):
-            st.rerun()
+    # הזמנות
+    sh_ords = gc.open(SHEET_ORDERS)
+    try: ws_ords = sh_ords.worksheet("PICKTASKS")
+    except: ws_ords = sh_ords.sheet1
+    df_ords = pd.DataFrame(ws_ords.get_all_records())
+except:
+    st.error("שגיאה בטעינת הקבצים. בדוק שמות ושיתוף.")
+    st.stop()
 
-        # --- זיהוי עמודות חכם (התיקון הגדול) ---
+# --- זיהוי עמודות ---
+col_status = find_column(df_ords, ['Status', 'סטטוס', 'מצב'])
+col_pname_ord = find_column(df_ords, ['ProductName', 'שם מוצר', 'פריט'])
+col_qty_ord = find_column(df_ords, ['QtyToPick', 'כמות', 'Quantity'])
+
+col_name_inv = find_column(df_inv, ['שם מוצר', 'ProductName', 'פריט'])
+col_qty_inv = find_column(df_inv, ['Quantity', 'Live_Qty', 'כמות'])
+# המערכת תחפש את הברקוד בעמודות האלו (אצווה או תוקף)
+col_batch_inv = find_column(df_inv, ['אצווה', 'BatchNumber', 'Batch', 'תאריך תפוגה', 'תוקף']) 
+col_date_inv = find_column(df_inv, ['תאריך ושעה', 'EntryDate', 'Date'])
+
+# --- לוגיקה ---
+if col_status:
+    # לוקחים רק משימות פתוחות
+    pending = df_ords[df_ords[col_status] != 'Done']
+
+    if pending.empty:
+        st.success("🎉 כל המשימות הושלמו! המחסן נקי.")
+        st.balloons()
+    else:
+        # 1. לוקחים רק את המשימה הראשונה בתור (Focus Mode)
+        current_task = pending.iloc[0]
+        task_index = pending.index[0] # שומרים את מספר השורה המקורי
+
+        p_name = str(current_task.get(col_pname_ord, 'Unknown')).strip()
+        qty_needed = float(current_task.get(col_qty_ord, 0))
+
+        # 2. מחשבים קרטונים
+        div = 24 if "מתוק וקל 1000" in p_name else 12
+        try: cartons = math.ceil(qty_needed / div)
+        except: cartons = 0
+
+        # 3. מוצאים את האצווה הישנה ביותר במלאי (FIFO)
+        target_batch = "לא נמצא"
+        target_stock = 0
         
-        # זיהוי עמודת סטטוס
-        col_status = find_column(df_ords, ['Status', 'סטטוס', 'מצב', 'status'])
+        # סינון המלאי לפי שם מדוייק
+        stock_subset = df_inv[df_inv[col_name_inv].astype(str).str.strip() == p_name]
         
-        if not col_status:
-            st.error(f"לא מצאתי עמודת סטטוס בהזמנות! העמודות שיש הן: {list(df_ords.columns)}")
-        else:
-            # סינון משימות פתוחות
-            pending = df_ords[df_ords[col_status] != 'Done']
-
-            if pending.empty:
-                st.success("🎉 אין משימות פתוחות! המחסן נקי.")
-            else:
-                st.info(f"משימות לביצוע: {len(pending)}")
+        if not stock_subset.empty and col_date_inv:
+            # מיון מהישן לחדש
+            try:
+                stock_subset = stock_subset.sort_values(col_date_inv)
+                # סינון רק מה שיש בו מלאי חיובי
+                valid_stock = stock_subset[pd.to_numeric(stock_subset[col_qty_inv], errors='coerce') > 0]
                 
-                for i, row in pending.iterrows():
-                    with st.container(border=True):
-                        # זיהוי שמות עמודות בהזמנה
-                        col_pname_ord = find_column(df_ords, ['ProductName', 'שם מוצר', 'פריט', 'SKU'])
-                        col_qty_ord = find_column(df_ords, ['QtyToPick', 'כמות', 'Quantity', 'Qty'])
-                        
-                        p_name = row.get(col_pname_ord, 'לא ידוע')
-                        qty = row.get(col_qty_ord, 0)
-                        
-                        st.header(f"📦 {p_name}")
-                        
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            # חישוב קרטונים
-                            div = 24 if "מתוק וקל 1000" in str(p_name) else 12
-                            try:
-                                cartons = math.ceil(float(qty) / div)
-                            except:
-                                cartons = 0
-                            
-                            st.markdown(f"""
-                            <div class="info-box">
-                            להזמנה: <b>{qty}</b><br>
-                            קרטונים: <b>{cartons}</b>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with c2:
-                            # --- חיפוש חכם במלאי ---
-                            # המערכת מחפשת גם Quantity וגם כמות
-                            col_qty_inv = find_column(df_inv, ['Quantity', 'Live_Qty', 'כמות', 'Qty', 'Amount'])
-                            col_name_inv = find_column(df_inv, ['שם מוצר', 'ProductName', 'פריט'])
-                            col_date_inv = find_column(df_inv, ['תאריך ושעה', 'EntryDate', 'Date', 'תאריך'])
-                            col_exp_inv = find_column(df_inv, ['תאריך תפוגה', 'ExpiryDate', 'תוקף'])
+                if not valid_stock.empty:
+                    # הנתון שאנחנו מצפים שהסורק יקרא (למשל מספר אצווה או תוקף)
+                    target_batch = str(valid_stock.iloc[0].get(col_batch_inv, 'General')).strip()
+                    target_stock = valid_stock.iloc[0].get(col_qty_inv, 0)
+            except: pass
 
-                            # אם המערכת עדיין לא מוצאת, היא תגיד לך בדיוק מה הבעיה
-                            if not col_qty_inv or not col_name_inv:
-                                st.error("שגיאה: לא מצאתי עמודת 'שם מוצר' או 'כמות' בקובץ המלאי.")
-                                st.warning(f"העמודות שמצאתי בקובץ שלך הן: {list(df_inv.columns)}")
-                            else:
-                                # סינון המלאי לפי המוצר
-                                stock_found = df_inv[df_inv[col_name_inv] == p_name]
-                                
-                                # המרה למספרים וסיכום
-                                total_stock = pd.to_numeric(stock_found[col_qty_inv], errors='coerce').sum()
-                                
-                                if total_stock >= float(qty):
-                                    expiry_text = "לא צויין"
-                                    # ניסיון למצוא תאריך (FIFO)
-                                    if col_date_inv and not stock_found.empty:
-                                        try:
-                                            # מיון לפי תאריך כניסה
-                                            stock_found = stock_found.sort_values(col_date_inv)
-                                            # מציאת השורה הראשונה עם מלאי חיובי
-                                            valid_batches = stock_found[pd.to_numeric(stock_found[col_qty_inv], errors='coerce') > 0]
-                                            if not valid_batches.empty:
-                                                if col_exp_inv:
-                                                    expiry_text = valid_batches.iloc[0].get(col_exp_inv, 'לא ידוע')
-                                        except:
-                                            pass
+        # --- התצוגה למלקט ---
+        st.info(f"משימות שנותרו: {len(pending)}")
+        st.markdown("---")
+        
+        # כותרת ענקית של המוצר
+        st.markdown(f'<p class="big-font">📦 {p_name}</p>', unsafe_allow_html=True)
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("כמות להזמנה", qty_needed)
+        with c2:
+            st.metric("מספר קרטונים", cartons)
+        with c3:
+            st.metric("מלאי במדף", target_stock)
 
-                                    st.markdown(f"""
-                                    <div class="success-box">
-                                    ✅ <b>יש במלאי!</b> ({total_stock})<br>
-                                    תוקף מומלץ: {expiry_text}
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                    
-                                    st.write("")
-                                    if st.button("✅ אשר ליקוט", key=f"btn_{i}"):
-                                        # עדכון גוגל שיטס
-                                        try:
-                                            row_num = i + 2 
-                                            col_idx = df_ords.columns.get_loc(col_status) + 1
-                                            ws_ords.update_cell(row_num, col_idx, "Done")
-                                            st.success("עודכן בענן!")
-                                            time.sleep(1)
-                                            st.rerun()
-                                        except Exception as e:
-                                            st.error(f"שגיאה בעדכון: {e}")
+        st.markdown("---")
 
-                                else:
-                                    st.markdown(f'<div class="error-box">❌ חסר במלאי (יש רק {total_stock})</div>', unsafe_allow_html=True)
+        # קופסת FIFO צהובה
+        st.markdown(f"""
+        <div class="batch-box">
+            <h3>🛡️ בקרת FIFO</h3>
+            <p>האצווה הישנה ביותר במדף היא: <b>{target_batch}</b></p>
+            <p class="scan-instruction">אנא סרוק את המוצר לאישור 👇</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    except Exception as main_e:
-        st.error(f"שגיאה כללית בתוכנה: {main_e}")
+        st.write("")
+        
+        # --- השדה של הסורק ---
+        # הסורק "מקליד" לתוך השדה הזה ועושה אנטר. key דינמי מנקה את השדה אחרי רענון
+        scanned_code = st.text_input("סרוק ברקוד כאן:", key=f"scan_{task_index}")
+
+        if scanned_code:
+            # ניקוי הקלט מהסורק
+            scanned_clean = scanned_code.strip()
+            target_clean = target_batch.strip()
+
+            # --- מנגנון הבדיקה ---
+            
+            # בדיקה 1: האם הסריקה תואמת לאצווה המצופה?
+            if scanned_clean == target_clean:
+                st.success(f"✅ סריקה תקינה! ({scanned_clean})")
+                
+                try:
+                    # שלב א': עדכון כמות במלאי (הפחתה)
+                    # מחפשים את השורה באקסל המלאי שמתאימה למוצר ולאצווה
+                    cell_found = ws_inv.find(p_name) # חיפוש ראשוני לפי שם
+                    
+                    # חיפוש מדוייק יותר בתוך הרשומות
+                    all_records = ws_inv.get_all_records()
+                    inv_row_to_update = None
+                    
+                    for i, record in enumerate(all_records):
+                        # שורה באקסל היא אינדקס + 2
+                        current_row = i + 2
+                        r_name = str(record.get(col_name_inv)).strip()
+                        r_batch = str(record.get(col_batch_inv)).strip()
+                        
+                        # מחפשים שורה שיש בה גם את שם המוצר וגם את האצווה שנסרקה
+                        if r_name == p_name and r_batch == scanned_clean:
+                            inv_row_to_update = current_row
+                            break
+                    
+                    if inv_row_to_update:
+                        # מצאנו את השורה! עכשיו נעדכן כמות
+                        col_idx_qty = df_inv.columns.get_loc(col_qty_inv) + 1
+                        current_qty = float(ws_inv.cell(inv_row_to_update, col_idx_qty).value)
+                        new_qty = current_qty - qty_needed
+                        ws_inv.update_cell(inv_row_to_update, col_idx_qty, new_qty)
+                        st.info(f"המלאי עודכן: {current_qty} -> {new_qty}")
+                    else:
+                        st.warning("המוצר אושר, אך לא נמצאה שורת המלאי המדויקת לעדכון הכמות.")
+
+                    # שלב ב': סגירת ההזמנה
+                    row_num_ord = task_index + 2
+                    col_idx_status = df_ords.columns.get_loc(col_status) + 1
+                    ws_ords.update_cell(row_num_ord, col_idx_status, "Done")
+                    
+                    st.toast("עודכן בהצלחה! עובר למוצר הבא...")
+                    time.sleep(1)
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"שגיאה בעדכון הנתונים: {e}")
+            
+            # בדיקה 2: האם המלקט כתב ידנית 'OK' לאישור חריג?
+            elif scanned_clean.upper() == "OK":
+                row_num_ord = task_index + 2
+                col_idx_status = df_ords.columns.get_loc(col_status) + 1
+                ws_ords.update_cell(row_num_ord, col_idx_status, "Done")
+                st.warning("הליקוט אושר ידנית (עקיפה).")
+                time.sleep(1)
+                st.rerun()
+
+            else:
+                # אם הסריקה לא תואמת
+                st.error(f"⛔ שגיאת FIFO! סרקת '{scanned_clean}' אך המערכת מצפה ל-'{target_clean}'.")
+                st.warning("נא לחפש את הסחורה הישנה יותר.")
+                st.info("אם אין ברירה, הקלד OK בשדה הסריקה כדי לאלץ אישור.")
+
+else:
+    st.error("לא נמצאה עמודת סטטוס בקובץ ההזמנות.")
